@@ -1,9 +1,10 @@
+use crate::proto::ChatMessage;
 use anyhow::Result;
 use bytes::Bytes;
 use futures::StreamExt;
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::error;
 
 const CHANNEL_CAPACITY: usize = 1024;
@@ -13,16 +14,18 @@ pub struct AppState {
     rooms: Arc<RwLock<HashMap<String, broadcast::Sender<Bytes>>>>,
     redis_client: Client,
     redis_pub: Arc<Mutex<MultiplexedConnection>>,
+    persist_tx: mpsc::Sender<ChatMessage>,
 }
 
 impl AppState {
-    pub async fn new(redis_url: &str) -> Result<Self> {
+    pub async fn new(redis_url: &str, persist_tx: mpsc::Sender<ChatMessage>) -> Result<Self> {
         let redis_client = Client::open(redis_url)?;
         let redis_pub = redis_client.get_multiplexed_async_connection().await?;
         Ok(Self {
             rooms: Arc::new(RwLock::new(HashMap::new())),
             redis_client,
             redis_pub: Arc::new(Mutex::new(redis_pub)),
+            persist_tx,
         })
     }
 
@@ -40,7 +43,6 @@ impl AppState {
         let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
         rooms.insert(room_id.to_string(), tx.clone());
 
-        // One Redis subscriber per room — feeds the local broadcast channel
         let client = self.redis_client.clone();
         let room = room_id.to_string();
         tokio::spawn(async move {
@@ -60,10 +62,13 @@ impl AppState {
             error!("redis publish error on '{channel}': {e}");
         }
     }
+
+    pub async fn record(&self, msg: ChatMessage) {
+        // fire-and-forget; if channel is full we drop rather than block the WS handler
+        let _ = self.persist_tx.try_send(msg);
+    }
 }
 
-// Runs as a background task for each room.
-// Subscribes to Redis channel and forwards messages into the local broadcast.
 async fn redis_room_subscriber(
     client: Client,
     room_id: String,
@@ -75,7 +80,7 @@ async fn redis_room_subscriber(
 
     while let Some(msg) = stream.next().await {
         let data: Vec<u8> = msg.get_payload()?;
-        let _ = tx.send(Bytes::from(data)); // error = no local subscribers, safe to ignore
+        let _ = tx.send(Bytes::from(data));
     }
 
     Ok(())

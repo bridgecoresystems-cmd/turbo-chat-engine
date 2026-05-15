@@ -53,13 +53,14 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState) {
 
     let mut rx = state.join_room(&room_id).await;
 
-    // Publish the join message itself so everyone in the room sees it
+    // Persist and broadcast the join message
+    state.record(chat_msg).await;
     let first_raw = Bytes::copy_from_slice(first_frame.payload.as_ref());
     state.publish(&room_id, first_raw).await;
 
     loop {
         tokio::select! {
-            // Broadcast from other clients in the same room
+            // Message from another client via Redis → local broadcast
             recv = rx.recv() => match recv {
                 Ok(data) => {
                     let frame = Frame::binary(Payload::Owned(data.to_vec()));
@@ -78,6 +79,14 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState) {
                     OpCode::Close => break,
                     OpCode::Binary => {
                         let data = Bytes::copy_from_slice(frame.payload.as_ref());
+
+                        // Decode for persistence; publish raw bytes to Redis regardless
+                        if let Ok(env) = Envelope::decode(data.as_ref()) {
+                            if let Some(Kind::Message(msg)) = env.kind {
+                                state.record(msg).await;
+                            }
+                        }
+
                         state.publish(&room_id, data).await;
                     }
                     _ => {}
