@@ -5,7 +5,7 @@ use futures::StreamExt;
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
-use tracing::error;
+use tracing::{error, info};
 
 const CHANNEL_CAPACITY: usize = 1024;
 
@@ -29,6 +29,20 @@ impl AppState {
         })
     }
 
+    // Одна фоновая задача на весь сервер вместо одной на каждую комнату
+    pub fn start_redis_dispatcher(&self) {
+        let client = self.redis_client.clone();
+        let rooms  = self.rooms.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = redis_dispatcher(client.clone(), rooms.clone()).await {
+                    error!("redis dispatcher crashed, restarting in 1s: {e}");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+            }
+        });
+    }
+
     pub async fn join_room(&self, room_id: &str) -> broadcast::Receiver<Bytes> {
         {
             let rooms = self.rooms.read().await;
@@ -41,17 +55,9 @@ impl AppState {
             return tx.subscribe();
         }
         let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
-        rooms.insert(room_id.to_string(), tx.clone());
-
-        let client = self.redis_client.clone();
-        let room = room_id.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = redis_room_subscriber(client, room, tx).await {
-                error!("redis subscriber crashed: {e}");
-            }
-        });
-
+        rooms.insert(room_id.to_string(), tx);
         rx
+        // больше не спавним Redis-задачу на каждую комнату
     }
 
     pub async fn publish(&self, room_id: &str, msg: Bytes) {
@@ -64,23 +70,31 @@ impl AppState {
     }
 
     pub async fn record(&self, msg: ChatMessage) {
-        // fire-and-forget; if channel is full we drop rather than block the WS handler
         let _ = self.persist_tx.try_send(msg);
     }
 }
 
-async fn redis_room_subscriber(
+// Одно соединение, подписанное на паттерн "room:*".
+// Все сообщения всех комнат приходят сюда и диспатчатся в нужный broadcast-канал.
+async fn redis_dispatcher(
     client: Client,
-    room_id: String,
-    tx: broadcast::Sender<Bytes>,
+    rooms: Arc<RwLock<HashMap<String, broadcast::Sender<Bytes>>>>,
 ) -> Result<()> {
     let mut pubsub = client.get_async_pubsub().await?;
-    pubsub.subscribe(format!("room:{room_id}")).await?;
-    let mut stream = pubsub.on_message();
+    pubsub.psubscribe("room:*").await?;
+    info!("redis dispatcher ready (pattern: room:*)");
 
+    let mut stream = pubsub.on_message();
     while let Some(msg) = stream.next().await {
-        let data: Vec<u8> = msg.get_payload()?;
-        let _ = tx.send(Bytes::from(data));
+        let channel = msg.get_channel_name();
+        let room_id = channel.strip_prefix("room:").unwrap_or(channel);
+
+        if let Ok(data) = msg.get_payload::<Vec<u8>>() {
+            let rooms = rooms.read().await;
+            if let Some(tx) = rooms.get(room_id) {
+                let _ = tx.send(Bytes::from(data));
+            }
+        }
     }
 
     Ok(())

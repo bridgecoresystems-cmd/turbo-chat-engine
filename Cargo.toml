@@ -24,6 +24,9 @@ bytes = "1"
 # Stream utilities (for Redis PubSub message stream)
 futures = "0.3"
 
+# WebSocket client (stress test binary)
+tokio-tungstenite = "0.24"
+
 # Redis pub/sub
 redis = { version = "0.27", features = ["tokio-comp", "aio"] }
 
@@ -43,3 +46,11 @@ dotenvy = "0.15"
 [build-dependencies]
 # Protobuf code generation
 prost-build = "0.13"
+
+[[bin]]
+name = "turbo_chat_engine"
+path = "src/main.rs"
+
+[[bin]]
+name = "stress"
+path = "src/bin/stress.rs"

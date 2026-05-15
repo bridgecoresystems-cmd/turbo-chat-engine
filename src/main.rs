@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
     let state = AppState::new(&redis_url, persist_tx).await?;
+    state.start_redis_dispatcher();
     info!("connected to Redis at {redis_url}");
 
     // ── WebSocket server ──────────────────────────────────────────────────────
