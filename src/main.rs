@@ -33,6 +33,8 @@ async fn handle_http(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -40,7 +42,12 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let state = AppState::new();
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+
+    let state = AppState::new(&redis_url).await?;
+    info!("connected to Redis at {redis_url}");
+
     let addr: SocketAddr = "0.0.0.0:8080".parse()?;
     let listener = TcpListener::bind(addr).await?;
     info!("listening on {addr}");

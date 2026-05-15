@@ -21,6 +21,9 @@ prost = "0.13"
 # Byte buffer utilities
 bytes = "1"
 
+# Stream utilities (for Redis PubSub message stream)
+futures = "0.3"
+
 # Redis pub/sub
 redis = { version = "0.27", features = ["tokio-comp", "aio"] }
 
