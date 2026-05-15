@@ -1,5 +1,5 @@
 use anyhow::Result;
-use fastwebsockets::{upgrade, FragmentCollector, OpCode, WebSocketError};
+use fastwebsockets::upgrade;
 use http_body_util::Empty;
 use hyper::{body::Bytes, server::conn::http1, service::service_fn, Request, Response};
 use hyper_util::rt::TokioIo;
@@ -11,45 +11,23 @@ mod proto {
     include!(concat!(env!("OUT_DIR"), "/turbo_chat.rs"));
 }
 
-async fn handle_ws(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
-    let ws = FragmentCollector::new(fut.await?);
-    let mut ws = ws;
+mod state;
+mod ws_handler;
 
-    info!("client connected");
-
-    loop {
-        let frame = ws.read_frame().await?;
-        match frame.opcode {
-            OpCode::Close => break,
-            OpCode::Binary => {
-                // echo back — will be replaced by Redis routing
-                ws.write_frame(fastwebsockets::Frame::binary(frame.payload))
-                    .await?;
-            }
-            _ => {}
-        }
-    }
-
-    info!("client disconnected");
-    Ok(())
-}
+use state::AppState;
 
 async fn handle_http(
     mut req: Request<hyper::body::Incoming>,
+    state: AppState,
 ) -> Result<Response<Empty<Bytes>>, anyhow::Error> {
     if upgrade::is_upgrade_request(&req) {
         let (res, fut) = upgrade::upgrade(&mut req)?;
         tokio::spawn(async move {
-            if let Err(e) = handle_ws(fut).await {
-                error!("ws error: {e}");
-            }
+            ws_handler::handle_ws(fut, state).await;
         });
         Ok(res)
     } else {
-        Ok(Response::builder()
-            .status(400)
-            .body(Empty::new())
-            .unwrap())
+        Ok(Response::builder().status(400).body(Empty::new()).unwrap())
     }
 }
 
@@ -62,6 +40,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let state = AppState::new();
     let addr: SocketAddr = "0.0.0.0:8080".parse()?;
     let listener = TcpListener::bind(addr).await?;
     info!("listening on {addr}");
@@ -70,10 +49,12 @@ async fn main() -> Result<()> {
         let (stream, peer) = listener.accept().await?;
         info!("new connection from {peer}");
         let io = TokioIo::new(stream);
+        let state = state.clone();
 
         tokio::spawn(async move {
+            let svc = service_fn(move |req| handle_http(req, state.clone()));
             if let Err(e) = http1::Builder::new()
-                .serve_connection(io, service_fn(handle_http))
+                .serve_connection(io, svc)
                 .with_upgrades()
                 .await
             {
