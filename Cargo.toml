@@ -1,0 +1,39 @@
+[package]
+name = "turbo_chat_engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# WebSocket
+fastwebsockets = { version = "0.8", features = ["upgrade"] }
+
+# HTTP (needed for WebSocket upgrade)
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# Protobuf serialization
+prost = "0.13"
+
+# Redis pub/sub
+redis = { version = "0.27", features = ["tokio-comp", "aio"] }
+
+# PostgreSQL
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+
+# Env config
+dotenvy = "0.15"
+
+[build-dependencies]
+# Protobuf code generation
+prost-build = "0.13"

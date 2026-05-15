@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package turbo_chat;
+
+message ChatMessage {
+  uint64 id        = 1; // unique message id
+  string room_id   = 2; // channel / room identifier
+  string sender_id = 3; // user identifier
+  bytes  payload   = 4; // raw message content
+  int64  timestamp = 5; // unix timestamp ms
+}
+
+message Envelope {
+  oneof kind {
+    ChatMessage message = 1;
+    Ack         ack     = 2;
+  }
+}
+
+message Ack {
+  uint64 message_id = 1;
+}
