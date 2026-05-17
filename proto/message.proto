@@ -12,11 +12,27 @@ message ChatMessage {
 
 message Envelope {
   oneof kind {
-    ChatMessage message = 1;
-    Ack         ack     = 2;
+    ChatMessage message  = 1;
+    Ack         ack      = 2;
+    Typing      typing   = 3;
+    Presence    presence = 4;
   }
 }
 
 message Ack {
   uint64 message_id = 1;
+}
+
+// Typing indicator — broadcast to room, never persisted
+message Typing {
+  string room_id   = 1;
+  string user_id   = 2;
+  bool   is_typing = 3;
+}
+
+// Online presence — sent on join/leave
+message Presence {
+  string room_id = 1;
+  string user_id = 2;
+  string status  = 3; // "online" | "offline"
 }

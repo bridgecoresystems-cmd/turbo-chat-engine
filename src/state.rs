@@ -3,6 +3,8 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures::StreamExt;
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
+use serde::Serialize;
+use sqlx::PgPool;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{error, info};
@@ -16,6 +18,16 @@ pub struct AppState {
     redis_pub: Arc<Mutex<MultiplexedConnection>>,
     persist_tx: mpsc::Sender<ChatMessage>,
     pub jwt_secret: Arc<String>,
+    pub pool: PgPool,
+}
+
+#[derive(Serialize)]
+pub struct HistoryMessage {
+    pub id: i64,
+    pub room_id: String,
+    pub sender_id: String,
+    pub text: String,
+    pub timestamp: i64,
 }
 
 impl AppState {
@@ -23,6 +35,7 @@ impl AppState {
         redis_url: &str,
         persist_tx: mpsc::Sender<ChatMessage>,
         jwt_secret: String,
+        pool: PgPool,
     ) -> Result<Self> {
         let redis_client = Client::open(redis_url)?;
         let redis_pub = redis_client.get_multiplexed_async_connection().await?;
@@ -32,10 +45,10 @@ impl AppState {
             redis_pub: Arc::new(Mutex::new(redis_pub)),
             persist_tx,
             jwt_secret: Arc::new(jwt_secret),
+            pool,
         })
     }
 
-    // Одна фоновая задача на весь сервер вместо одной на каждую комнату
     pub fn start_redis_dispatcher(&self) {
         let client = self.redis_client.clone();
         let rooms  = self.rooms.clone();
@@ -63,7 +76,6 @@ impl AppState {
         let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
         rooms.insert(room_id.to_string(), tx);
         rx
-        // больше не спавним Redis-задачу на каждую комнату
     }
 
     pub async fn publish(&self, room_id: &str, msg: Bytes) {
@@ -78,10 +90,36 @@ impl AppState {
     pub async fn record(&self, msg: ChatMessage) {
         let _ = self.persist_tx.try_send(msg);
     }
+
+    pub async fn get_history(&self, room_id: &str, limit: i64) -> Result<Vec<HistoryMessage>> {
+        struct Row { id: i64, room_id: String, sender_id: String, payload: Vec<u8>, timestamp: i64 }
+
+        let rows = sqlx::query_as!(
+            Row,
+            "SELECT id, room_id, sender_id, payload, timestamp
+             FROM messages
+             WHERE room_id = $1
+             ORDER BY timestamp ASC
+             LIMIT $2",
+            room_id,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| HistoryMessage {
+                id: r.id,
+                room_id: r.room_id,
+                sender_id: r.sender_id,
+                text: String::from_utf8(r.payload).unwrap_or_default(),
+                timestamp: r.timestamp,
+            })
+            .collect())
+    }
 }
 
-// Одно соединение, подписанное на паттерн "room:*".
-// Все сообщения всех комнат приходят сюда и диспатчатся в нужный broadcast-канал.
 async fn redis_dispatcher(
     client: Client,
     rooms: Arc<RwLock<HashMap<String, broadcast::Sender<Bytes>>>>,
