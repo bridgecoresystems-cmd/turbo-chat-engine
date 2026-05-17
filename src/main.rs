@@ -5,12 +5,13 @@ use hyper::{body::Bytes, server::conn::http1, service::service_fn, Request, Resp
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use tokio::{net::TcpListener, sync::mpsc};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/turbo_chat.rs"));
 }
 
+mod auth;
 mod persistence;
 mod state;
 mod ws_handler;
@@ -21,15 +22,29 @@ async fn handle_http(
     mut req: Request<hyper::body::Incoming>,
     state: AppState,
 ) -> Result<Response<Empty<Bytes>>, anyhow::Error> {
-    if upgrade::is_upgrade_request(&req) {
-        let (res, fut) = upgrade::upgrade(&mut req)?;
-        tokio::spawn(async move {
-            ws_handler::handle_ws(fut, state).await;
-        });
-        Ok(res)
-    } else {
-        Ok(Response::builder().status(400).body(Empty::new()).unwrap())
+    if !upgrade::is_upgrade_request(&req) {
+        return Ok(Response::builder().status(400).body(Empty::new()).unwrap());
     }
+
+    // Extract and verify JWT before upgrading the connection
+    let token = auth::token_from_query(req.uri().query());
+    let claims = match token.as_deref().map(|t| auth::verify(t, &state.jwt_secret)) {
+        Some(Ok(c)) => c,
+        Some(Err(e)) => {
+            warn!("rejected connection: {e}");
+            return Ok(Response::builder().status(401).body(Empty::new()).unwrap());
+        }
+        None => {
+            warn!("rejected connection: missing token");
+            return Ok(Response::builder().status(401).body(Empty::new()).unwrap());
+        }
+    };
+
+    let (res, fut) = upgrade::upgrade(&mut req)?;
+    tokio::spawn(async move {
+        ws_handler::handle_ws(fut, state, claims).await;
+    });
+    Ok(res)
 }
 
 #[tokio::main]
@@ -71,7 +86,13 @@ async fn main() -> Result<()> {
     // ── Redis ─────────────────────────────────────────────────────────────────
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
-    let state = AppState::new(&redis_url, persist_tx).await?;
+
+    // ── JWT ───────────────────────────────────────────────────────────────────
+    let jwt_secret = std::env::var("JWT_SECRET")
+        .unwrap_or_else(|_| "dev-secret-change-in-production".to_string());
+    info!("JWT auth enabled");
+
+    let state = AppState::new(&redis_url, persist_tx, jwt_secret).await?;
     state.start_redis_dispatcher();
     info!("connected to Redis at {redis_url}");
 
@@ -82,7 +103,6 @@ async fn main() -> Result<()> {
 
     loop {
         let (stream, peer) = listener.accept().await?;
-        info!("new connection from {peer}");
         let io = TokioIo::new(stream);
         let state = state.clone();
 

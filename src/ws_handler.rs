@@ -5,11 +5,12 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{error, info, warn};
 
 use crate::{
+    auth::Claims,
     proto::{envelope::Kind, Envelope},
     state::AppState,
 };
 
-pub async fn handle_ws(fut: UpgradeFut, state: AppState) {
+pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
     let mut ws = match fut.await {
         Ok(ws) => FragmentCollector::new(ws),
         Err(e) => {
@@ -18,15 +19,16 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState) {
         }
     };
 
-    // First binary frame must be an Envelope{ChatMessage} — declares room + sender
+    // First binary frame declares which room to join.
+    // sender_id is taken from JWT claims — client cannot spoof it.
     let first_frame = match ws.read_frame().await {
         Ok(f) if f.opcode == OpCode::Binary => f,
         Ok(_) => {
-            warn!("first frame must be binary protobuf");
+            warn!("{} sent non-binary first frame", claims.sub);
             return;
         }
         Err(e) => {
-            error!("read error on first frame: {e}");
+            error!("read error on first frame from {}: {e}", claims.sub);
             return;
         }
     };
@@ -34,33 +36,41 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState) {
     let envelope = match Envelope::decode(first_frame.payload.as_ref()) {
         Ok(e) => e,
         Err(e) => {
-            error!("protobuf decode error: {e}");
+            error!("protobuf decode error from {}: {e}", claims.sub);
             return;
         }
     };
 
-    let chat_msg = match envelope.kind {
+    let mut chat_msg = match envelope.kind {
         Some(Kind::Message(m)) => m,
         _ => {
-            warn!("first envelope must contain a ChatMessage");
+            warn!("{}: first envelope must contain a ChatMessage", claims.sub);
             return;
         }
     };
 
-    let room_id = chat_msg.room_id.clone();
-    let sender_id = chat_msg.sender_id.clone();
-    info!("{sender_id} joined room '{room_id}'");
+    let room_id  = chat_msg.room_id.clone();
+    let sender_id = claims.sub.clone(); // trusted identity from JWT
+
+    // Overwrite whatever the client sent — sender_id is authoritative from the token
+    chat_msg.sender_id = sender_id.clone();
+
+    info!("{sender_id} (role={}) joined room '{room_id}'", claims.role);
 
     let mut rx = state.join_room(&room_id).await;
 
-    // Persist and broadcast the join message
+    // Persist and broadcast the join message with the trusted sender_id
+    let join_bytes = {
+        let env = Envelope { kind: Some(Kind::Message(chat_msg.clone())) };
+        let mut buf = Vec::with_capacity(env.encoded_len());
+        env.encode(&mut buf).unwrap();
+        Bytes::from(buf)
+    };
     state.record(chat_msg).await;
-    let first_raw = Bytes::copy_from_slice(first_frame.payload.as_ref());
-    state.publish(&room_id, first_raw).await;
+    state.publish(&room_id, join_bytes).await;
 
     loop {
         tokio::select! {
-            // Message from another client via Redis → local broadcast
             recv = rx.recv() => match recv {
                 Ok(data) => {
                     let frame = Frame::binary(Payload::Owned(data.to_vec()));
@@ -73,21 +83,20 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState) {
                 Err(RecvError::Closed) => break,
             },
 
-            // Message from this client
             read = ws.read_frame() => match read {
                 Ok(frame) => match frame.opcode {
                     OpCode::Close => break,
                     OpCode::Binary => {
-                        let data = Bytes::copy_from_slice(frame.payload.as_ref());
+                        let raw = Bytes::copy_from_slice(frame.payload.as_ref());
 
-                        // Decode for persistence; publish raw bytes to Redis regardless
-                        if let Ok(env) = Envelope::decode(data.as_ref()) {
-                            if let Some(Kind::Message(msg)) = env.kind {
+                        if let Ok(env) = Envelope::decode(raw.as_ref()) {
+                            if let Some(Kind::Message(mut msg)) = env.kind {
+                                msg.sender_id = sender_id.clone(); // enforce trusted id
                                 state.record(msg).await;
                             }
                         }
 
-                        state.publish(&room_id, data).await;
+                        state.publish(&room_id, raw).await;
                     }
                     _ => {}
                 },

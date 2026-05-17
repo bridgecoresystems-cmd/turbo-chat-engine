@@ -43,6 +43,10 @@ anyhow = "1"
 # Env config
 dotenvy = "0.15"
 
+# JWT authentication
+jsonwebtoken = "9"
+serde = { version = "1", features = ["derive"] }
+
 [build-dependencies]
 # Protobuf code generation
 prost-build = "0.13"

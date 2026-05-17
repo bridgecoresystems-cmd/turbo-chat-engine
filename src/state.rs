@@ -15,10 +15,15 @@ pub struct AppState {
     redis_client: Client,
     redis_pub: Arc<Mutex<MultiplexedConnection>>,
     persist_tx: mpsc::Sender<ChatMessage>,
+    pub jwt_secret: Arc<String>,
 }
 
 impl AppState {
-    pub async fn new(redis_url: &str, persist_tx: mpsc::Sender<ChatMessage>) -> Result<Self> {
+    pub async fn new(
+        redis_url: &str,
+        persist_tx: mpsc::Sender<ChatMessage>,
+        jwt_secret: String,
+    ) -> Result<Self> {
         let redis_client = Client::open(redis_url)?;
         let redis_pub = redis_client.get_multiplexed_async_connection().await?;
         Ok(Self {
@@ -26,6 +31,7 @@ impl AppState {
             redis_client,
             redis_pub: Arc::new(Mutex::new(redis_pub)),
             persist_tx,
+            jwt_secret: Arc::new(jwt_secret),
         })
     }
 
