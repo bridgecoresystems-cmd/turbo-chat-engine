@@ -9,6 +9,9 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{error, info};
 
+// Max messages per user per second
+pub const RATE_LIMIT_MSG_PER_SEC: u32 = 10;
+
 const CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Clone)]

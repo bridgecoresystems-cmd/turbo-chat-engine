@@ -16,6 +16,7 @@ mod proto {
 
 mod auth;
 mod persistence;
+mod rate_limit;
 mod state;
 mod ws_handler;
 
@@ -166,20 +167,46 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!("listening on {addr}");
 
-    loop {
-        let (stream, peer) = listener.accept().await?;
-        let io    = TokioIo::new(stream);
-        let state = state.clone();
+    // Graceful shutdown: wait for Ctrl+C or SIGTERM
+    let shutdown = async {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = async {
+                #[cfg(unix)]
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("SIGTERM handler failed")
+                    .recv()
+                    .await;
+                #[cfg(not(unix))]
+                std::future::pending::<()>().await;
+            } => {},
+        }
+    };
+    tokio::pin!(shutdown);
 
-        tokio::spawn(async move {
-            let svc = service_fn(move |req| handle_http(req, state.clone()));
-            if let Err(e) = http1::Builder::new()
-                .serve_connection(io, svc)
-                .with_upgrades()
-                .await
-            {
-                error!("connection error from {peer}: {e}");
+    loop {
+        tokio::select! {
+            Ok((stream, peer)) = listener.accept() => {
+                let io    = TokioIo::new(stream);
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let svc = service_fn(move |req| handle_http(req, state.clone()));
+                    if let Err(e) = http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .with_upgrades()
+                        .await
+                    {
+                        error!("connection error from {peer}: {e}");
+                    }
+                });
             }
-        });
+            _ = &mut shutdown => {
+                info!("shutdown signal received — stopping");
+                break;
+            }
+        }
     }
+
+    info!("server stopped");
+    Ok(())
 }

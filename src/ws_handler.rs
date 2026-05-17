@@ -7,7 +7,8 @@ use tracing::{error, info, warn};
 use crate::{
     auth::Claims,
     proto::{envelope::Kind, Envelope, Presence},
-    state::AppState,
+    rate_limit::{RateLimiter, WARN_INTERVAL},
+    state::{AppState, RATE_LIMIT_MSG_PER_SEC},
 };
 
 pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
@@ -42,7 +43,9 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
 
     info!("{sender_id} (role={}) joined room '{room_id}'", claims.role);
 
-    let mut rx = state.join_room(&room_id).await;
+    let mut rx       = state.join_room(&room_id).await;
+    let mut limiter  = RateLimiter::new(RATE_LIMIT_MSG_PER_SEC);
+    let mut last_warn = std::time::Instant::now() - WARN_INTERVAL;
 
     // Broadcast presence: online
     broadcast_presence(&state, &room_id, &sender_id, "online").await;
@@ -72,6 +75,15 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
                 Ok(frame) => match frame.opcode {
                     OpCode::Close => break,
                     OpCode::Binary => {
+                        // Rate limit check
+                        if !limiter.allow() {
+                            if last_warn.elapsed() >= WARN_INTERVAL {
+                                warn!("{sender_id} rate-limited (>{RATE_LIMIT_MSG_PER_SEC} msg/s)");
+                                last_warn = std::time::Instant::now();
+                            }
+                            continue; // drop message silently
+                        }
+
                         let raw = Bytes::copy_from_slice(frame.payload.as_ref());
 
                         if let Ok(env) = Envelope::decode(raw.as_ref()) {
@@ -82,7 +94,6 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
                                     state.publish(&room_id, raw).await;
                                 }
                                 Some(Kind::Typing(mut t)) => {
-                                    // Typing indicator — broadcast but don't persist
                                     t.user_id = sender_id.clone();
                                     let bytes = encode_envelope(Kind::Typing(t));
                                     state.publish(&room_id, bytes).await;
