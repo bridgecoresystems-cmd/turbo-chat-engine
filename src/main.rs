@@ -241,6 +241,11 @@ async fn main() -> Result<()> {
     .execute(&pool)
     .await?;
 
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS edited_at  BIGINT")
+        .execute(&pool).await?;
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_at BIGINT")
+        .execute(&pool).await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS read_receipts (
             message_id BIGINT NOT NULL,

@@ -150,11 +150,41 @@ impl AppState {
         let _ = self.persist_tx.try_send(msg);
     }
 
+    /// Returns true if message was updated (sender matches and message not deleted).
+    pub async fn edit_message(&self, message_id: u64, sender_id: &str, new_payload: &[u8]) -> bool {
+        let now = now_ms();
+        sqlx::query(
+            "UPDATE messages SET payload = $1, edited_at = $2
+             WHERE id = $3 AND sender_id = $4 AND deleted_at IS NULL",
+        )
+        .bind(new_payload)
+        .bind(now)
+        .bind(message_id as i64)
+        .bind(sender_id)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected() > 0)
+        .unwrap_or(false)
+    }
+
+    /// Returns true if message was soft-deleted (sender matches and not already deleted).
+    pub async fn delete_message(&self, message_id: u64, sender_id: &str) -> bool {
+        let now = now_ms();
+        sqlx::query(
+            "UPDATE messages SET deleted_at = $1
+             WHERE id = $2 AND sender_id = $3 AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(message_id as i64)
+        .bind(sender_id)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected() > 0)
+        .unwrap_or(false)
+    }
+
     pub async fn record_read(&self, message_id: u64, user_id: &str, room_id: &str) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now = now_ms();
         let _ = sqlx::query(
             "INSERT INTO read_receipts (message_id, user_id, room_id, read_at)
              VALUES ($1, $2, $3, $4)
@@ -201,6 +231,13 @@ impl AppState {
             })
             .collect())
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 async fn redis_dispatcher(

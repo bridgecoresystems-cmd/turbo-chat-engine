@@ -12,11 +12,26 @@ message ChatMessage {
 
 message Envelope {
   oneof kind {
-    ChatMessage message  = 1;
-    Ack         ack      = 2;
-    Typing      typing   = 3;
-    Presence    presence = 4;
+    ChatMessage   message  = 1;
+    Ack           ack      = 2;
+    Typing        typing   = 3;
+    Presence      presence = 4;
+    EditMessage   edit     = 5;
+    DeleteMessage delete   = 6;
   }
+}
+
+message EditMessage {
+  uint64 message_id  = 1;
+  bytes  new_payload = 2;
+  string room_id     = 3; // set by server
+  string sender_id   = 4; // set by server
+}
+
+message DeleteMessage {
+  uint64 message_id = 1;
+  string room_id    = 2; // set by server
+  string sender_id  = 3; // set by server
 }
 
 message Ack {

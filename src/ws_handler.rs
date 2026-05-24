@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     auth::Claims,
-    proto::{envelope::Kind, Ack, Envelope, Presence},
+    proto::{envelope::Kind, Ack, DeleteMessage, EditMessage, Envelope, Presence},
     rate_limit::{RateLimiter, WARN_INTERVAL},
     state::{AppState, RATE_LIMIT_MSG_PER_SEC},
 };
@@ -94,6 +94,33 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
                                     t.user_id = sender_id.clone();
                                     let bytes = encode_envelope(Kind::Typing(t));
                                     state.publish(&room_id, bytes).await;
+                                }
+                                Some(Kind::Edit(edit)) => {
+                                    let ok = state
+                                        .edit_message(edit.message_id, &sender_id, &edit.new_payload)
+                                        .await;
+                                    if ok {
+                                        let ev = EditMessage {
+                                            message_id:  edit.message_id,
+                                            new_payload: edit.new_payload,
+                                            room_id:     room_id.clone(),
+                                            sender_id:   sender_id.clone(),
+                                        };
+                                        state.publish(&room_id, encode_envelope(Kind::Edit(ev))).await;
+                                    }
+                                }
+                                Some(Kind::Delete(del)) => {
+                                    let ok = state
+                                        .delete_message(del.message_id, &sender_id)
+                                        .await;
+                                    if ok {
+                                        let ev = DeleteMessage {
+                                            message_id: del.message_id,
+                                            room_id:    room_id.clone(),
+                                            sender_id:  sender_id.clone(),
+                                        };
+                                        state.publish(&room_id, encode_envelope(Kind::Delete(ev))).await;
+                                    }
                                 }
                                 Some(Kind::Ack(ack)) => {
                                     state.record_read(ack.message_id, &sender_id, &room_id).await;
