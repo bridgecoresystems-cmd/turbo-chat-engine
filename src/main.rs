@@ -15,12 +15,14 @@ mod proto {
 }
 
 mod auth;
+mod fcm;
 mod persistence;
 mod rate_limit;
 mod state;
 mod storage;
 mod ws_handler;
 
+use fcm::FcmClient;
 use state::AppState;
 use storage::R2Storage;
 
@@ -36,13 +38,13 @@ fn body_json(s: &str) -> BoxedBody {
         .boxed()
 }
 
-fn json_response(status: u16, body: &str) -> Result<Response<BoxedBody>> {
-    Ok(Response::builder()
+fn json_response(status: u16, body: &str) -> Response<BoxedBody> {
+    Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(body_json(body))
-        .unwrap())
+        .unwrap()
 }
 
 fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
@@ -59,14 +61,14 @@ async fn handle_http(
 
     // ── GET /health ───────────────────────────────────────────────────────────
     if method == Method::GET && path == "/health" {
-        return Ok(json_response(200, r#"{"status":"ok"}"#).unwrap());
+        return Ok(json_response(200, r#"{"status":"ok"}"#));
     }
 
     // ── GET /history/:room_id?limit=50 ────────────────────────────────────────
     if method == Method::GET && path.starts_with("/history/") {
         let room_id = path.trim_start_matches("/history/").to_string();
         if room_id.is_empty() {
-            return Ok(json_response(400, r#"{"error":"missing room_id"}"#).unwrap());
+            return Ok(json_response(400, r#"{"error":"missing room_id"}"#));
         }
         let limit: i64 = query_param(query.as_deref(), "limit")
             .and_then(|v| v.parse().ok())
@@ -76,34 +78,25 @@ async fn handle_http(
         return match state.get_history(&room_id, limit).await {
             Ok(msgs) => {
                 let json = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into());
-                Ok(json_response(200, &json).unwrap())
+                Ok(json_response(200, &json))
             }
             Err(e) => {
                 error!("history query: {e}");
-                Ok(json_response(500, r#"{"error":"internal error"}"#).unwrap())
+                Ok(json_response(500, r#"{"error":"internal error"}"#))
             }
         };
     }
 
     // ── GET /upload-url?filename=photo.jpg&content_type=image%2Fjpeg ─────────
     if method == Method::GET && path == "/upload-url" {
-        // Требуем JWT
         let token = auth::token_from_query(query.as_deref());
-        match token.as_deref().map(|t| auth::verify(t, &state.jwt_secret)) {
-            Some(Ok(_))  => {}
-            Some(Err(e)) => {
-                warn!("upload-url rejected: {e}");
-                return Ok(Response::builder().status(401).body(body_empty()).unwrap());
-            }
-            None => {
-                warn!("upload-url rejected: missing token");
-                return Ok(Response::builder().status(401).body(body_empty()).unwrap());
-            }
+        if let Err(resp) = require_auth(&token, &state.jwt_secret) {
+            return Ok(resp);
         }
 
         let filename = match query_param(query.as_deref(), "filename") {
             Some(f) if !f.is_empty() => f,
-            _ => return Ok(json_response(400, r#"{"error":"missing filename"}"#).unwrap()),
+            _ => return Ok(json_response(400, r#"{"error":"missing filename"}"#)),
         };
         let content_type = query_param(query.as_deref(), "content_type")
             .unwrap_or("application/octet-stream");
@@ -119,31 +112,64 @@ async fn handle_http(
                     "file_url":   file_url,
                     "key":        key,
                 });
-                Ok(json_response(200, &body.to_string()).unwrap())
+                Ok(json_response(200, &body.to_string()))
             }
             Err(e) => {
                 error!("presign error: {e}");
-                Ok(json_response(500, r#"{"error":"storage error"}"#).unwrap())
+                Ok(json_response(500, r#"{"error":"storage error"}"#))
+            }
+        };
+    }
+
+    // ── POST /register-token  { "token": "fcm_token_here" } ──────────────────
+    if method == Method::POST && path == "/register-token" {
+        let token = auth::token_from_query(query.as_deref());
+        let claims = match require_auth(&token, &state.jwt_secret) {
+            Ok(c) => c,
+            Err(resp) => return Ok(resp),
+        };
+
+        let body = match req.collect().await {
+            Ok(b) => b.to_bytes(),
+            Err(_) => return Ok(json_response(400, r#"{"error":"invalid body"}"#)),
+        };
+
+        #[derive(serde::Deserialize)]
+        struct Payload { token: String }
+        let payload: Payload = match serde_json::from_slice(&body) {
+            Ok(p) => p,
+            Err(_) => return Ok(json_response(400, r#"{"error":"expected {\"token\":\"...\"}"}"#)),
+        };
+
+        let result = sqlx::query(
+            "INSERT INTO device_tokens (user_id, fcm_token, updated_at)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (user_id) DO UPDATE SET fcm_token = $2, updated_at = $3",
+        )
+        .bind(&claims.sub)
+        .bind(&payload.token)
+        .bind(chrono_now_ms())
+        .execute(&state.pool)
+        .await;
+
+        return match result {
+            Ok(_) => Ok(json_response(200, r#"{"ok":true}"#)),
+            Err(e) => {
+                error!("register-token db error: {e}");
+                Ok(json_response(500, r#"{"error":"internal error"}"#))
             }
         };
     }
 
     // ── WebSocket upgrade ─────────────────────────────────────────────────────
     if !upgrade::is_upgrade_request(&req) {
-        return Ok(json_response(400, r#"{"error":"expected websocket upgrade"}"#).unwrap());
+        return Ok(json_response(400, r#"{"error":"expected websocket upgrade"}"#));
     }
 
     let token = auth::token_from_query(query.as_deref());
-    let claims = match token.as_deref().map(|t| auth::verify(t, &state.jwt_secret)) {
-        Some(Ok(c))  => c,
-        Some(Err(e)) => {
-            warn!("rejected: {e}");
-            return Ok(Response::builder().status(401).body(body_empty()).unwrap());
-        }
-        None => {
-            warn!("rejected: missing token");
-            return Ok(Response::builder().status(401).body(body_empty()).unwrap());
-        }
+    let claims = match require_auth(&token, &state.jwt_secret) {
+        Ok(c) => c,
+        Err(resp) => return Ok(resp),
     };
 
     let (res, fut) = match upgrade::upgrade(&mut req) {
@@ -158,6 +184,30 @@ async fn handle_http(
     });
 
     Ok(res.map(|_| body_empty()))
+}
+
+fn require_auth(
+    token: &Option<String>,
+    secret: &str,
+) -> Result<crate::auth::Claims, Response<BoxedBody>> {
+    match token.as_deref().map(|t| auth::verify(t, secret)) {
+        Some(Ok(c)) => Ok(c),
+        Some(Err(e)) => {
+            warn!("rejected: {e}");
+            Err(Response::builder().status(401).body(body_empty()).unwrap())
+        }
+        None => {
+            warn!("rejected: missing token");
+            Err(Response::builder().status(401).body(body_empty()).unwrap())
+        }
+    }
+}
+
+fn chrono_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 #[tokio::main]
@@ -203,6 +253,16 @@ async fn main() -> Result<()> {
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS device_tokens (
+            user_id    TEXT   PRIMARY KEY,
+            fcm_token  TEXT   NOT NULL,
+            updated_at BIGINT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
     let (persist_tx, persist_rx) = mpsc::channel(8_192);
     let worker = persistence::BatchWorker::new(persist_rx, pool.clone());
     tokio::spawn(async move { worker.run().await });
@@ -218,16 +278,24 @@ async fn main() -> Result<()> {
     info!("JWT auth enabled");
 
     // ── Cloudflare R2 ─────────────────────────────────────────────────────────
-    let r2_account_id  = std::env::var("R2_ACCOUNT_ID").expect("R2_ACCOUNT_ID required");
-    let r2_access_key  = std::env::var("R2_ACCESS_KEY_ID").expect("R2_ACCESS_KEY_ID required");
-    let r2_secret_key  = std::env::var("R2_SECRET_ACCESS_KEY").expect("R2_SECRET_ACCESS_KEY required");
-    let r2_bucket      = std::env::var("R2_BUCKET").unwrap_or_else(|_| "turbo-chat-files".to_string());
-    let r2_public_url  = std::env::var("R2_PUBLIC_URL")
+    let r2_account_id = std::env::var("R2_ACCOUNT_ID").expect("R2_ACCOUNT_ID required");
+    let r2_access_key = std::env::var("R2_ACCESS_KEY_ID").expect("R2_ACCESS_KEY_ID required");
+    let r2_secret_key = std::env::var("R2_SECRET_ACCESS_KEY").expect("R2_SECRET_ACCESS_KEY required");
+    let r2_bucket     = std::env::var("R2_BUCKET").unwrap_or_else(|_| "turbo-chat-files".to_string());
+    let r2_public_url = std::env::var("R2_PUBLIC_URL")
         .unwrap_or_else(|_| format!("https://{r2_account_id}.r2.cloudflarestorage.com/{r2_bucket}"));
     let storage = R2Storage::new(&r2_account_id, &r2_access_key, &r2_secret_key, &r2_bucket, &r2_public_url);
     info!("R2 storage ready (bucket: {r2_bucket})");
 
-    let state = AppState::new(&redis_url, persist_tx, jwt_secret, pool, storage).await?;
+    // ── FCM ───────────────────────────────────────────────────────────────────
+    let fcm = std::env::var("FCM_SERVICE_ACCOUNT").ok().and_then(|json| {
+        match FcmClient::from_json(&json) {
+            Ok(c) => { info!("FCM push notifications enabled"); Some(c) }
+            Err(e) => { error!("FCM init failed: {e}"); None }
+        }
+    });
+
+    let state = AppState::new(&redis_url, persist_tx, jwt_secret, pool, storage, fcm).await?;
     state.start_redis_dispatcher();
     info!("connected to Redis at {redis_url}");
 
@@ -236,7 +304,6 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!("listening on {addr}");
 
-    // Graceful shutdown: Ctrl+C или SIGTERM
     let shutdown = async {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {},

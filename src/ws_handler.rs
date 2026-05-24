@@ -38,26 +38,24 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
     };
 
     let room_id   = chat_msg.room_id.clone();
-    let sender_id = claims.sub.clone(); // trusted from JWT
+    let sender_id = claims.sub.clone();
     chat_msg.sender_id = sender_id.clone();
 
     info!("{sender_id} (role={}) joined room '{room_id}'", claims.role);
 
-    let mut rx       = state.join_room(&room_id).await;
-    let mut limiter  = RateLimiter::new(RATE_LIMIT_MSG_PER_SEC);
+    let mut rx        = state.join_room(&room_id).await;
+    let mut limiter   = RateLimiter::new(RATE_LIMIT_MSG_PER_SEC);
     let mut last_warn = std::time::Instant::now() - WARN_INTERVAL;
 
-    // Broadcast presence: online
+    state.user_joined(&room_id, &sender_id).await;
     broadcast_presence(&state, &room_id, &sender_id, "online").await;
 
-    // Persist and broadcast join message
     let join_bytes = encode_envelope(Kind::Message(chat_msg.clone()));
     state.record(chat_msg).await;
     state.publish(&room_id, join_bytes).await;
 
     loop {
         tokio::select! {
-            // Incoming from Redis broadcast → send to this client
             recv = rx.recv() => match recv {
                 Ok(data) => {
                     let frame = Frame::binary(Payload::Owned(data.to_vec()));
@@ -70,18 +68,16 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
                 Err(RecvError::Closed)    => break,
             },
 
-            // Incoming from this client → route to room
             read = ws.read_frame() => match read {
                 Ok(frame) => match frame.opcode {
                     OpCode::Close => break,
                     OpCode::Binary => {
-                        // Rate limit check
                         if !limiter.allow() {
                             if last_warn.elapsed() >= WARN_INTERVAL {
                                 warn!("{sender_id} rate-limited (>{RATE_LIMIT_MSG_PER_SEC} msg/s)");
                                 last_warn = std::time::Instant::now();
                             }
-                            continue; // drop message silently
+                            continue;
                         }
 
                         let raw = Bytes::copy_from_slice(frame.payload.as_ref());
@@ -90,8 +86,9 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
                             match env.kind {
                                 Some(Kind::Message(mut msg)) => {
                                     msg.sender_id = sender_id.clone();
-                                    state.record(msg).await;
+                                    state.record(msg.clone()).await;
                                     state.publish(&room_id, raw).await;
+                                    send_fcm_to_offline(&state, &room_id, &sender_id).await;
                                 }
                                 Some(Kind::Typing(mut t)) => {
                                     t.user_id = sender_id.clone();
@@ -124,16 +121,32 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
         }
     }
 
-    // Broadcast presence: offline
+    state.user_left(&sender_id).await;
     broadcast_presence(&state, &room_id, &sender_id, "offline").await;
     info!("{sender_id} left room '{room_id}'");
 }
 
+async fn send_fcm_to_offline(state: &AppState, room_id: &str, sender_id: &str) {
+    let Some(fcm) = state.fcm.clone() else { return };
+    let tokens = state.offline_tokens(room_id, sender_id).await;
+    if tokens.is_empty() { return; }
+
+    let room_id = room_id.to_string();
+    let sender_id = sender_id.to_string();
+    tokio::spawn(async move {
+        for token in tokens {
+            let _ = fcm
+                .send(&token, "Новое сообщение", &format!("От {sender_id}"), &room_id, &sender_id)
+                .await;
+        }
+    });
+}
+
 async fn broadcast_presence(state: &AppState, room_id: &str, user_id: &str, status: &str) {
     let bytes = encode_envelope(Kind::Presence(Presence {
-        room_id:  room_id.to_string(),
-        user_id:  user_id.to_string(),
-        status:   status.to_string(),
+        room_id: room_id.to_string(),
+        user_id: user_id.to_string(),
+        status:  status.to_string(),
     }));
     state.publish(room_id, bytes).await;
 }

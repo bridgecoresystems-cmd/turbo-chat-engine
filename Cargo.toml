@@ -55,6 +55,9 @@ aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
 # Unique file keys
 uuid = { version = "1", features = ["v4"] }
 
+# FCM push notifications (HTTP client)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
 [build-dependencies]
 # Protobuf code generation
 prost-build = "0.13"
