@@ -1,4 +1,4 @@
-use crate::proto::ChatMessage;
+use crate::{proto::ChatMessage, storage::R2Storage};
 use anyhow::Result;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -22,6 +22,7 @@ pub struct AppState {
     persist_tx: mpsc::Sender<ChatMessage>,
     pub jwt_secret: Arc<String>,
     pub pool: PgPool,
+    pub storage: Arc<R2Storage>,
 }
 
 #[derive(Serialize)]
@@ -39,6 +40,7 @@ impl AppState {
         persist_tx: mpsc::Sender<ChatMessage>,
         jwt_secret: String,
         pool: PgPool,
+        storage: R2Storage,
     ) -> Result<Self> {
         let redis_client = Client::open(redis_url)?;
         let redis_pub = redis_client.get_multiplexed_async_connection().await?;
@@ -49,6 +51,7 @@ impl AppState {
             persist_tx,
             jwt_secret: Arc::new(jwt_secret),
             pool,
+            storage: Arc::new(storage),
         })
     }
 

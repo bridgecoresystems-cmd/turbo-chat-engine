@@ -18,9 +18,11 @@ mod auth;
 mod persistence;
 mod rate_limit;
 mod state;
+mod storage;
 mod ws_handler;
 
 use state::AppState;
+use storage::R2Storage;
 
 type BoxedBody = BoxBody<Bytes, Infallible>;
 
@@ -43,12 +45,17 @@ fn json_response(status: u16, body: &str) -> Result<Response<BoxedBody>> {
         .unwrap())
 }
 
+fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
+    query?.split('&').find_map(|p| p.strip_prefix(key)?.strip_prefix('='))
+}
+
 async fn handle_http(
     mut req: Request<hyper::body::Incoming>,
     state: AppState,
 ) -> Result<Response<BoxedBody>, Infallible> {
     let path   = req.uri().path().to_string();
     let method = req.method().clone();
+    let query  = req.uri().query().map(str::to_string);
 
     // ── GET /health ───────────────────────────────────────────────────────────
     if method == Method::GET && path == "/health" {
@@ -61,10 +68,7 @@ async fn handle_http(
         if room_id.is_empty() {
             return Ok(json_response(400, r#"{"error":"missing room_id"}"#).unwrap());
         }
-        let limit: i64 = req
-            .uri()
-            .query()
-            .and_then(|q| q.split('&').find_map(|p| p.strip_prefix("limit=")))
+        let limit: i64 = query_param(query.as_deref(), "limit")
             .and_then(|v| v.parse().ok())
             .unwrap_or(50)
             .min(200);
@@ -81,12 +85,55 @@ async fn handle_http(
         };
     }
 
+    // ── GET /upload-url?filename=photo.jpg&content_type=image%2Fjpeg ─────────
+    if method == Method::GET && path == "/upload-url" {
+        // Требуем JWT
+        let token = auth::token_from_query(query.as_deref());
+        match token.as_deref().map(|t| auth::verify(t, &state.jwt_secret)) {
+            Some(Ok(_))  => {}
+            Some(Err(e)) => {
+                warn!("upload-url rejected: {e}");
+                return Ok(Response::builder().status(401).body(body_empty()).unwrap());
+            }
+            None => {
+                warn!("upload-url rejected: missing token");
+                return Ok(Response::builder().status(401).body(body_empty()).unwrap());
+            }
+        }
+
+        let filename = match query_param(query.as_deref(), "filename") {
+            Some(f) if !f.is_empty() => f,
+            _ => return Ok(json_response(400, r#"{"error":"missing filename"}"#).unwrap()),
+        };
+        let content_type = query_param(query.as_deref(), "content_type")
+            .unwrap_or("application/octet-stream");
+
+        let ext = filename.rsplit('.').next().unwrap_or("bin");
+        let key = format!("{}/{}.{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), ext);
+
+        return match state.storage.presigned_put(&key, content_type).await {
+            Ok(upload_url) => {
+                let file_url = state.storage.public_url(&key);
+                let body = serde_json::json!({
+                    "upload_url": upload_url,
+                    "file_url":   file_url,
+                    "key":        key,
+                });
+                Ok(json_response(200, &body.to_string()).unwrap())
+            }
+            Err(e) => {
+                error!("presign error: {e}");
+                Ok(json_response(500, r#"{"error":"storage error"}"#).unwrap())
+            }
+        };
+    }
+
     // ── WebSocket upgrade ─────────────────────────────────────────────────────
     if !upgrade::is_upgrade_request(&req) {
         return Ok(json_response(400, r#"{"error":"expected websocket upgrade"}"#).unwrap());
     }
 
-    let token = auth::token_from_query(req.uri().query());
+    let token = auth::token_from_query(query.as_deref());
     let claims = match token.as_deref().map(|t| auth::verify(t, &state.jwt_secret)) {
         Some(Ok(c))  => c,
         Some(Err(e)) => {
@@ -158,7 +205,17 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "dev-secret-change-in-production".to_string());
     info!("JWT auth enabled");
 
-    let state = AppState::new(&redis_url, persist_tx, jwt_secret, pool).await?;
+    // ── Cloudflare R2 ─────────────────────────────────────────────────────────
+    let r2_account_id  = std::env::var("R2_ACCOUNT_ID").expect("R2_ACCOUNT_ID required");
+    let r2_access_key  = std::env::var("R2_ACCESS_KEY_ID").expect("R2_ACCESS_KEY_ID required");
+    let r2_secret_key  = std::env::var("R2_SECRET_ACCESS_KEY").expect("R2_SECRET_ACCESS_KEY required");
+    let r2_bucket      = std::env::var("R2_BUCKET").unwrap_or_else(|_| "turbo-chat-files".to_string());
+    let r2_public_url  = std::env::var("R2_PUBLIC_URL")
+        .unwrap_or_else(|_| format!("https://{r2_account_id}.r2.cloudflarestorage.com/{r2_bucket}"));
+    let storage = R2Storage::new(&r2_account_id, &r2_access_key, &r2_secret_key, &r2_bucket, &r2_public_url);
+    info!("R2 storage ready (bucket: {r2_bucket})");
+
+    let state = AppState::new(&redis_url, persist_tx, jwt_secret, pool, storage).await?;
     state.start_redis_dispatcher();
     info!("connected to Redis at {redis_url}");
 
@@ -167,7 +224,7 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!("listening on {addr}");
 
-    // Graceful shutdown: wait for Ctrl+C or SIGTERM
+    // Graceful shutdown: Ctrl+C или SIGTERM
     let shutdown = async {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {},
