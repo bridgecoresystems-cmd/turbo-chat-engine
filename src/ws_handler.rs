@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     auth::Claims,
-    proto::{envelope::Kind, Envelope, Presence},
+    proto::{envelope::Kind, Ack, Envelope, Presence},
     rate_limit::{RateLimiter, WARN_INTERVAL},
     state::{AppState, RATE_LIMIT_MSG_PER_SEC},
 };
@@ -96,6 +96,16 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
                                 Some(Kind::Typing(mut t)) => {
                                     t.user_id = sender_id.clone();
                                     let bytes = encode_envelope(Kind::Typing(t));
+                                    state.publish(&room_id, bytes).await;
+                                }
+                                Some(Kind::Ack(ack)) => {
+                                    state.record_read(ack.message_id, &sender_id, &room_id).await;
+                                    let ack_out = Ack {
+                                        message_id: ack.message_id,
+                                        user_id: sender_id.clone(),
+                                        room_id: room_id.clone(),
+                                    };
+                                    let bytes = encode_envelope(Kind::Ack(ack_out));
                                     state.publish(&room_id, bytes).await;
                                 }
                                 _ => {

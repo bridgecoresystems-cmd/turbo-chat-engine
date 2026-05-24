@@ -191,6 +191,18 @@ async fn main() -> Result<()> {
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS read_receipts (
+            message_id BIGINT NOT NULL,
+            user_id    TEXT   NOT NULL,
+            room_id    TEXT   NOT NULL,
+            read_at    BIGINT NOT NULL,
+            PRIMARY KEY (message_id, user_id)
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
     let (persist_tx, persist_rx) = mpsc::channel(8_192);
     let worker = persistence::BatchWorker::new(persist_rx, pool.clone());
     tokio::spawn(async move { worker.run().await });

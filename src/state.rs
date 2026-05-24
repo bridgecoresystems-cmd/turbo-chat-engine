@@ -97,6 +97,24 @@ impl AppState {
         let _ = self.persist_tx.try_send(msg);
     }
 
+    pub async fn record_read(&self, message_id: u64, user_id: &str, room_id: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let _ = sqlx::query(
+            "INSERT INTO read_receipts (message_id, user_id, room_id, read_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (message_id, user_id) DO NOTHING",
+        )
+        .bind(message_id as i64)
+        .bind(user_id)
+        .bind(room_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await;
+    }
+
     pub async fn get_history(&self, room_id: &str, limit: i64) -> Result<Vec<HistoryMessage>> {
         struct Row { id: i64, room_id: String, sender_id: String, payload: Vec<u8>, timestamp: i64 }
 

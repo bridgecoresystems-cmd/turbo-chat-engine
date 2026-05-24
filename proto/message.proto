@@ -21,6 +21,8 @@ message Envelope {
 
 message Ack {
   uint64 message_id = 1;
+  string user_id    = 2; // who read it (set by server from JWT)
+  string room_id    = 3;
 }
 
 // Typing indicator — broadcast to room, never persisted
