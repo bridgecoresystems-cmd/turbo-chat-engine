@@ -39,3 +39,42 @@ impl RateLimiter {
 
 /// How long to wait before warning again after a rate-limit hit
 pub const WARN_INTERVAL: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_up_to_capacity() {
+        let mut limiter = RateLimiter::new(5);
+        for _ in 0..5 {
+            assert!(limiter.allow());
+        }
+    }
+
+    #[test]
+    fn denies_when_exceeded() {
+        let mut limiter = RateLimiter::new(3);
+        for _ in 0..3 { limiter.allow(); }
+        assert!(!limiter.allow());
+    }
+
+    #[test]
+    fn refills_after_time() {
+        let mut limiter = RateLimiter::new(5);
+        for _ in 0..5 { limiter.allow(); }
+        assert!(!limiter.allow());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(limiter.allow()); // ~1.5 tokens refilled
+    }
+
+    #[test]
+    fn does_not_exceed_capacity_after_long_pause() {
+        let mut limiter = RateLimiter::new(3);
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(limiter.allow());
+        assert!(limiter.allow());
+        assert!(limiter.allow());
+        assert!(!limiter.allow()); // cap at 3, not 6
+    }
+}
