@@ -23,7 +23,7 @@ mod storage;
 mod ws_handler;
 
 use fcm::FcmClient;
-use state::AppState;
+use state::{AppState, CreateRoomRequest};
 use storage::R2Storage;
 
 type BoxedBody = BoxBody<Bytes, Infallible>;
@@ -118,6 +118,74 @@ async fn handle_http(
                 error!("presign error: {e}");
                 Ok(json_response(500, r#"{"error":"storage error"}"#))
             }
+        };
+    }
+
+    // ── POST /rooms  { "name": "Math 101", "members": ["student_1"] } ─────────
+    if method == Method::POST && path == "/rooms" {
+        let token = auth::token_from_query(query.as_deref());
+        let claims = match require_auth(&token, &state.jwt_secret) {
+            Ok(c) => c,
+            Err(resp) => return Ok(resp),
+        };
+
+        let body = match req.collect().await {
+            Ok(b) => b.to_bytes(),
+            Err(_) => return Ok(json_response(400, r#"{"error":"invalid body"}"#)),
+        };
+        let req_body: CreateRoomRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(_) => return Ok(json_response(400, r#"{"error":"expected {\"name\":\"...\",\"members\":[]}"}"#)),
+        };
+
+        return match state.create_room(req_body, &claims.sub).await {
+            Ok(room) => {
+                let json = serde_json::to_string(&room).unwrap();
+                Ok(json_response(201, &json))
+            }
+            Err(e) => {
+                error!("create room: {e}");
+                Ok(json_response(500, r#"{"error":"internal error"}"#))
+            }
+        };
+    }
+
+    // ── GET /rooms ────────────────────────────────────────────────────────────
+    if method == Method::GET && path == "/rooms" {
+        let token = auth::token_from_query(query.as_deref());
+        let claims = match require_auth(&token, &state.jwt_secret) {
+            Ok(c) => c,
+            Err(resp) => return Ok(resp),
+        };
+
+        return match state.list_rooms(&claims.sub).await {
+            Ok(rooms) => {
+                let json = serde_json::to_string(&rooms).unwrap_or_else(|_| "[]".into());
+                Ok(json_response(200, &json))
+            }
+            Err(e) => {
+                error!("list rooms: {e}");
+                Ok(json_response(500, r#"{"error":"internal error"}"#))
+            }
+        };
+    }
+
+    // ── DELETE /rooms/:room_id ────────────────────────────────────────────────
+    if method == Method::DELETE && path.starts_with("/rooms/") {
+        let room_id = path.trim_start_matches("/rooms/").to_string();
+        if room_id.is_empty() {
+            return Ok(json_response(400, r#"{"error":"missing room_id"}"#));
+        }
+        let token = auth::token_from_query(query.as_deref());
+        let claims = match require_auth(&token, &state.jwt_secret) {
+            Ok(c) => c,
+            Err(resp) => return Ok(resp),
+        };
+
+        return if state.delete_room(&room_id, &claims.sub).await {
+            Ok(json_response(200, r#"{"ok":true}"#))
+        } else {
+            Ok(json_response(404, r#"{"error":"room not found or not your room"}"#))
         };
     }
 
@@ -236,6 +304,30 @@ async fn main() -> Result<()> {
             sender_id  TEXT   NOT NULL,
             payload    BYTEA  NOT NULL,
             timestamp  BIGINT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rooms (
+            id         TEXT   PRIMARY KEY,
+            name       TEXT   NOT NULL,
+            created_by TEXT   NOT NULL,
+            created_at BIGINT NOT NULL,
+            deleted_at BIGINT
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS room_members (
+            room_id   TEXT   NOT NULL,
+            user_id   TEXT   NOT NULL,
+            role      TEXT   NOT NULL DEFAULT 'member',
+            joined_at BIGINT NOT NULL,
+            PRIMARY KEY (room_id, user_id)
         )",
     )
     .execute(&pool)

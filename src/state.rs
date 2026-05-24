@@ -3,7 +3,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures::StreamExt;
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::{
     collections::{HashMap, HashSet},
@@ -30,6 +30,20 @@ pub struct AppState {
     pub pool: PgPool,
     pub storage: Arc<R2Storage>,
     pub fcm: Option<Arc<FcmClient>>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct RoomInfo {
+    pub id:         String,
+    pub name:       String,
+    pub created_by: String,
+    pub created_at: i64,
+}
+
+#[derive(Deserialize)]
+pub struct CreateRoomRequest {
+    pub name:    String,
+    pub members: Vec<String>, // user_ids to invite
 }
 
 #[derive(Serialize)]
@@ -196,6 +210,75 @@ impl AppState {
         .bind(now)
         .execute(&self.pool)
         .await;
+    }
+
+    pub async fn create_room(&self, req: CreateRoomRequest, created_by: &str) -> Result<RoomInfo> {
+        let id  = uuid::Uuid::new_v4().to_string();
+        let now = now_ms();
+
+        sqlx::query(
+            "INSERT INTO rooms (id, name, created_by, created_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&id)
+        .bind(&req.name)
+        .bind(created_by)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        // Creator is always owner
+        sqlx::query(
+            "INSERT INTO room_members (room_id, user_id, role, joined_at) VALUES ($1, $2, 'owner', $3)",
+        )
+        .bind(&id)
+        .bind(created_by)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        for member in &req.members {
+            let _ = sqlx::query(
+                "INSERT INTO room_members (room_id, user_id, role, joined_at)
+                 VALUES ($1, $2, 'member', $3)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(&id)
+            .bind(member)
+            .bind(now)
+            .execute(&self.pool)
+            .await;
+        }
+
+        Ok(RoomInfo { id, name: req.name, created_by: created_by.to_string(), created_at: now })
+    }
+
+    pub async fn list_rooms(&self, user_id: &str) -> Result<Vec<RoomInfo>> {
+        let rows = sqlx::query_as::<_, RoomInfo>(
+            "SELECT r.id, r.name, r.created_by, r.created_at
+             FROM rooms r
+             JOIN room_members rm ON rm.room_id = r.id
+             WHERE rm.user_id = $1 AND r.deleted_at IS NULL
+             ORDER BY r.created_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Returns true if room was deleted (only creator can delete).
+    pub async fn delete_room(&self, room_id: &str, user_id: &str) -> bool {
+        sqlx::query(
+            "UPDATE rooms SET deleted_at = $1
+             WHERE id = $2 AND created_by = $3 AND deleted_at IS NULL",
+        )
+        .bind(now_ms())
+        .bind(room_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected() > 0)
+        .unwrap_or(false)
     }
 
     pub async fn get_history(&self, room_id: &str, limit: i64) -> Result<Vec<HistoryMessage>> {
