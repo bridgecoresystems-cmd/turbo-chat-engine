@@ -53,6 +53,7 @@ pub struct HistoryMessage {
     pub sender_id: String,
     pub text: String,
     pub timestamp: i64,
+    pub read_by_peer: bool,
 }
 
 impl AppState {
@@ -121,6 +122,21 @@ impl AppState {
 
     pub async fn user_left(&self, user_id: &str) {
         self.online_users.write().await.remove(user_id);
+    }
+
+    /// Returns user_ids of currently-online room members (excluding `exclude`).
+    /// Used to inform a newly-joined user who else is already online.
+    pub async fn online_room_members(&self, room_id: &str, exclude: &str) -> Vec<String> {
+        let rm = self.room_members.read().await;
+        let online = self.online_users.read().await;
+        rm.get(room_id)
+            .map(|members| {
+                members.iter()
+                    .filter(|u| u.as_str() != exclude && online.contains(u.as_str()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Returns FCM tokens of room members who are offline (excluding sender).
@@ -289,19 +305,27 @@ impl AppState {
             sender_id: String,
             payload: Vec<u8>,
             timestamp: i64,
+            read_by_peer: bool,
         }
 
         // Get the newest `limit` real messages, exclude join/leave pseudo-messages,
+        // join read_receipts to know if any non-sender has read each message,
         // then re-sort oldest-first so the client sees chronological order.
         let rows = sqlx::query_as::<_, Row>(
-            "SELECT id, room_id, sender_id, payload, timestamp FROM (
+            "SELECT m.id, m.room_id, m.sender_id, m.payload, m.timestamp,
+                    EXISTS(
+                        SELECT 1 FROM read_receipts rr
+                        WHERE rr.message_id = m.id AND rr.user_id != m.sender_id
+                    ) AS read_by_peer
+             FROM (
                  SELECT id, room_id, sender_id, payload, timestamp
                  FROM messages
                  WHERE room_id = $1
                    AND payload NOT IN ('join'::bytea, 'leave'::bytea)
                  ORDER BY timestamp DESC
                  LIMIT $2
-             ) sub ORDER BY timestamp ASC",
+             ) m
+             ORDER BY m.timestamp ASC",
         )
         .bind(room_id)
         .bind(limit)
@@ -316,6 +340,7 @@ impl AppState {
                 sender_id: r.sender_id,
                 text: String::from_utf8(r.payload).unwrap_or_default(),
                 timestamp: r.timestamp,
+                read_by_peer: r.read_by_peer,
             })
             .collect())
     }

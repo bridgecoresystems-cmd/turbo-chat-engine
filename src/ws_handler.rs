@@ -50,6 +50,16 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
     state.user_joined(&room_id, &sender_id).await;
     broadcast_presence(&state, &room_id, &sender_id, "online").await;
 
+    // Tell the new joiner who else is already online in this room
+    for uid in state.online_room_members(&room_id, &sender_id).await {
+        let bytes = encode_envelope(Kind::Presence(Presence {
+            room_id: room_id.clone(),
+            user_id: uid,
+            status:  "online".to_string(),
+        }));
+        state.publish(&room_id, bytes).await;
+    }
+
     let join_bytes = encode_envelope(Kind::Message(chat_msg.clone()));
     state.publish(&room_id, join_bytes).await;
 
