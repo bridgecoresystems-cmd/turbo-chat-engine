@@ -1,33 +1,32 @@
 # Stage 1: build
 FROM rust:1.95-slim AS builder
 
-# Use bundled protoc binary — avoids apt-get (no internet in build environment)
-COPY protoc /usr/local/bin/protoc
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends protobuf-compiler \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Vendored dependencies — no internet needed
-COPY vendor/ ./vendor/
-COPY .cargo/ ./.cargo/
-
+# Copy manifests and proto first — Docker caches this layer
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto/ ./proto/
 COPY .sqlx/ ./.sqlx/
 
-ENV SQLX_OFFLINE=true
-RUN mkdir -p src/bin && echo "fn main() {}" > src/main.rs \
+# Compile dependencies with a dummy main (cached layer — only rebuilds when Cargo.toml changes)
+RUN mkdir -p src/bin \
+ && echo "fn main() {}" > src/main.rs \
  && echo "fn main() {}" > src/bin/stress.rs
-RUN cargo build --release --offline
+ENV SQLX_OFFLINE=true
+RUN cargo build --release
 RUN rm -rf src/
 
 # Build actual source
 COPY src/ ./src/
-RUN touch src/main.rs && cargo build --release --offline
+RUN touch src/main.rs && cargo build --release
 
 # Stage 2: minimal runtime
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
-# Copy CA certs from builder instead of running apt-get (avoids network issues in build)
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /app/target/release/turbo_chat_engine /usr/local/bin/turbo_chat_engine
 

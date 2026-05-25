@@ -282,6 +282,7 @@ impl AppState {
     }
 
     pub async fn get_history(&self, room_id: &str, limit: i64) -> Result<Vec<HistoryMessage>> {
+        #[derive(sqlx::FromRow)]
         struct Row {
             id: i64,
             room_id: String,
@@ -290,16 +291,20 @@ impl AppState {
             timestamp: i64,
         }
 
-        let rows = sqlx::query_as!(
-            Row,
-            "SELECT id, room_id, sender_id, payload, timestamp
-             FROM messages
-             WHERE room_id = $1
-             ORDER BY timestamp ASC
-             LIMIT $2",
-            room_id,
-            limit,
+        // Get the newest `limit` real messages, exclude join/leave pseudo-messages,
+        // then re-sort oldest-first so the client sees chronological order.
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT id, room_id, sender_id, payload, timestamp FROM (
+                 SELECT id, room_id, sender_id, payload, timestamp
+                 FROM messages
+                 WHERE room_id = $1
+                   AND payload NOT IN ('join'::bytea, 'leave'::bytea)
+                 ORDER BY timestamp DESC
+                 LIMIT $2
+             ) sub ORDER BY timestamp ASC",
         )
+        .bind(room_id)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
 

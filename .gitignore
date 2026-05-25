@@ -1,6 +1,7 @@
 /target
-Cargo.lock
 .env
 *.docx
 nginx/certs/privkey.pem
 nginx/certs/fullchain.pem
+vendor/
+.vscode/

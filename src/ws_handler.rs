@@ -51,7 +51,6 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
     broadcast_presence(&state, &room_id, &sender_id, "online").await;
 
     let join_bytes = encode_envelope(Kind::Message(chat_msg.clone()));
-    state.record(chat_msg).await;
     state.publish(&room_id, join_bytes).await;
 
     loop {
@@ -71,6 +70,13 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
             read = ws.read_frame() => match read {
                 Ok(frame) => match frame.opcode {
                     OpCode::Close => break,
+                    OpCode::Ping => {
+                        let pong = Frame::new(true, OpCode::Pong, None, Payload::Owned(frame.payload.as_ref().to_vec()));
+                        if let Err(e) = ws.write_frame(pong).await {
+                            error!("{sender_id} pong error: {e}");
+                            break;
+                        }
+                    }
                     OpCode::Binary => {
                         if !limiter.allow() {
                             if last_warn.elapsed() >= WARN_INTERVAL {
@@ -87,7 +93,9 @@ pub async fn handle_ws(fut: UpgradeFut, state: AppState, claims: Claims) {
                                 Some(Kind::Message(mut msg)) => {
                                     msg.sender_id = sender_id.clone();
                                     state.record(msg.clone()).await;
-                                    state.publish(&room_id, raw).await;
+                                    // Re-encode with the authoritative sender_id from JWT
+                                    // (raw bytes contain the client-supplied sender_id which may be wrong)
+                                    state.publish(&room_id, encode_envelope(Kind::Message(msg))).await;
                                     send_fcm_to_offline(&state, &room_id, &sender_id).await;
                                 }
                                 Some(Kind::Typing(mut t)) => {
