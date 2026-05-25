@@ -5,3 +5,4 @@ nginx/certs/privkey.pem
 nginx/certs/fullchain.pem
 vendor/
 .vscode/
+screens/
