@@ -87,36 +87,32 @@ async fn handle_http(
         };
     }
 
-    // ── GET /upload-url?filename=photo.jpg&content_type=image%2Fjpeg ─────────
-    if method == Method::GET && path == "/upload-url" {
+    // ── POST /upload?content_type=image%2Fjpeg&token=... ─────────────────────
+    if method == Method::POST && path == "/upload" {
         let token = auth::token_from_query(query.as_deref());
         if let Err(resp) = require_auth(&token, &state.jwt_secret) {
             return Ok(resp);
         }
 
-        let filename = match query_param(query.as_deref(), "filename") {
-            Some(f) if !f.is_empty() => f,
-            _ => return Ok(json_response(400, r#"{"error":"missing filename"}"#)),
-        };
         let content_type = query_param(query.as_deref(), "content_type")
-            .unwrap_or("application/octet-stream");
-
-        let ext = filename.rsplit('.').next().unwrap_or("bin");
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let ext = content_type.split('/').next_back().unwrap_or("bin");
         let key = format!("{}/{}.{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), ext);
 
-        return match state.storage.presigned_put(&key, content_type).await {
-            Ok(upload_url) => {
-                let file_url = state.storage.public_url(&key);
-                let body = serde_json::json!({
-                    "upload_url": upload_url,
-                    "file_url":   file_url,
-                    "key":        key,
-                });
-                Ok(json_response(200, &body.to_string()))
+        let data = match req.collect().await {
+            Ok(b) => b.to_bytes(),
+            Err(_) => return Ok(json_response(400, r#"{"error":"failed to read body"}"#)),
+        };
+
+        return match state.storage.put_object(&key, &content_type, data).await {
+            Ok(file_url) => {
+                let body = serde_json::json!({ "file_url": file_url }).to_string();
+                Ok(json_response(200, &body))
             }
             Err(e) => {
-                error!("presign error: {e}");
-                Ok(json_response(500, r#"{"error":"storage error"}"#))
+                error!("R2 upload failed: {e}");
+                Ok(json_response(500, r#"{"error":"upload failed"}"#))
             }
         };
     }

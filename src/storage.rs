@@ -2,10 +2,8 @@ use anyhow::Result;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{
     config::{Builder, Region},
-    presigning::PresigningConfig,
     Client,
 };
-use std::time::Duration;
 
 pub struct R2Storage {
     client: Client,
@@ -29,18 +27,17 @@ impl R2Storage {
         }
     }
 
-    /// Presigned PUT URL — клиент загружает файл напрямую в R2 (5 минут).
-    pub async fn presigned_put(&self, key: &str, content_type: &str) -> Result<String> {
-        let cfg = PresigningConfig::expires_in(Duration::from_secs(300))?;
-        let req = self
-            .client
+    /// Upload bytes directly to R2 (no presigning needed).
+    pub async fn put_object(&self, key: &str, content_type: &str, data: bytes::Bytes) -> Result<String> {
+        self.client
             .put_object()
             .bucket(&self.bucket)
             .key(key)
             .content_type(content_type)
-            .presigned(cfg)
+            .body(aws_sdk_s3::primitives::ByteStream::from(data))
+            .send()
             .await?;
-        Ok(req.uri().to_string())
+        Ok(self.public_url(key))
     }
 
     /// Публичный URL файла после загрузки.
