@@ -140,28 +140,22 @@ impl AppState {
     }
 
     /// Returns FCM tokens of room members who are offline (excluding sender).
+    /// Uses the `contacts` table (keyed by dmRoomId) to find room members,
+    /// because `room_members` uses UUID keys that don't match WebSocket room_ids.
     pub async fn offline_tokens(&self, room_id: &str, exclude: &str) -> Vec<String> {
-        let members: Vec<String> = {
-            let rm = self.room_members.read().await;
-            let online = self.online_users.read().await;
-            rm.get(room_id)
-                .map(|set| {
-                    set.iter()
-                        .filter(|u| u.as_str() != exclude && !online.contains(u.as_str()))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-
-        if members.is_empty() {
-            return vec![];
-        }
+        let online: Vec<String> = self.online_users.read().await.iter().cloned().collect();
 
         sqlx::query_scalar(
-            "SELECT fcm_token FROM device_tokens WHERE user_id = ANY($1)",
+            "SELECT DISTINCT dt.fcm_token
+             FROM contacts c
+             JOIN device_tokens dt ON dt.user_id = c.contact_id
+             WHERE c.room_id = $1
+               AND c.contact_id != $2
+               AND NOT (c.contact_id = ANY($3))",
         )
-        .bind(&members[..])
+        .bind(room_id)
+        .bind(exclude)
+        .bind(&online[..])
         .fetch_all(&self.pool)
         .await
         .unwrap_or_default()
