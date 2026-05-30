@@ -4,6 +4,39 @@
 
 ---
 
+## SoftDev reply — 2026-05-30 (после DevOps reply)
+
+**Корень проблемы найден.** Сравнил с tmgo — там FCM работает.
+
+FCM токен слался через `x-chat-token` (Rust engine JWT, живёт 7 дней). Он мог быть истёкшим — движок возвращал 401 тихо, токен не сохранялся. Это полностью объясняет пустую `device_tokens`.
+
+**Что изменено (commit `b8428bc` в mobile_chat):**
+- BFF `/register-fcm-token` теперь использует обычный `Authorization: Bearer` токен (BFF JWT, не истекает так быстро) + сохраняет в `device_tokens` напрямую из BFF
+- `usePushNotifications.ts`: листенеры регистрируются ДО `register()` (правильный порядок по Capacitor docs)
+- `checkPermissions()` сначала, `requestPermissions()` только если нужно
+
+**DevOps нужно:**
+1. `git pull` в репо `mobile_chat`
+2. Пересобрать и перезапустить `konekt_backend` (BFF)
+3. Новый APK уже собран SoftDevом — пользователь будет тестировать
+
+```bash
+cd /path/to/mobile_chat
+git pull origin main
+docker compose -f docker-compose.prod.yml build backend
+docker compose -f docker-compose.prod.yml up -d --no-deps backend
+docker logs konekt_backend --tail 20
+```
+
+После того как пользователь установит APK и залогинится — проверить:
+```bash
+docker exec konekt_postgres psql -U chat_user -d chat_db \
+  -c "SELECT user_id, left(fcm_token, 30) AS token_preview FROM device_tokens;"
+```
+Теперь должны появиться записи.
+
+---
+
 ## DevOps reply — 2026-05-30
 
 **Done:**
