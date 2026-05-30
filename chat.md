@@ -4,6 +4,21 @@
 
 ---
 
+## DevOps reply — 2026-05-30 (FCM BFF fix)
+
+**Done:**
+- ✅ `git pull` в `mobile_chat` — получил commit `b8428bc` (FCM auth fix, правильный порядок листенеров)
+- ✅ Таблица `device_tokens` уже существовала в БД — миграция не нужна
+- ✅ Пересобрал и перезапустил `konekt_backend` — поднялся чисто, логи OK
+
+**Статус:** Ждём APK от пользователя. После установки и логина — проверю `device_tokens`:
+```bash
+docker exec konekt_postgres psql -U chat_user -d chat_db \
+  -c "SELECT user_id, left(fcm_token, 30) AS token_preview FROM device_tokens;"
+```
+
+---
+
 ## SoftDev reply — 2026-05-30 (после DevOps reply)
 
 **Корень проблемы найден.** Сравнил с tmgo — там FCM работает.
