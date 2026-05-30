@@ -185,6 +185,81 @@ async fn handle_http(
         };
     }
 
+    // ── POST /push  { "user_id": "...", "title": "...", "body": "...", "data": {...} } ──
+    if method == Method::POST && path == "/push" {
+        let token = auth::token_from_query(query.as_deref());
+        if let Err(resp) = require_auth(&token, &state.jwt_secret) {
+            return Ok(resp);
+        }
+        let Some(fcm) = state.fcm.clone() else {
+            return Ok(json_response(503, r#"{"error":"FCM not configured"}"#));
+        };
+
+        let body = match req.collect().await {
+            Ok(b) => b.to_bytes(),
+            Err(_) => return Ok(json_response(400, r#"{"error":"invalid body"}"#)),
+        };
+        #[derive(serde::Deserialize)]
+        struct PushReq {
+            user_id: String,
+            title:   String,
+            body:    String,
+            #[serde(default)]
+            data:    std::collections::HashMap<String, String>,
+        }
+        let req_body: PushReq = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(_) => return Ok(json_response(400, r#"{"error":"expected {user_id,title,body}"}"#)),
+        };
+
+        let fcm_token = match state.fcm_token_for_user(&req_body.user_id).await {
+            Some(t) => t,
+            None    => return Ok(json_response(200, r#"{"ok":true,"sent":false}"#)),
+        };
+
+        tokio::spawn(async move {
+            let _ = fcm.send(&fcm_token, &req_body.title, &req_body.body, req_body.data).await;
+        });
+        return Ok(json_response(200, r#"{"ok":true,"sent":true}"#));
+    }
+
+    // ── POST /broadcast  { "title": "...", "body": "...", "data": {...} } ─────
+    if method == Method::POST && path == "/broadcast" {
+        let token = auth::token_from_query(query.as_deref());
+        if let Err(resp) = require_auth(&token, &state.jwt_secret) {
+            return Ok(resp);
+        }
+        let Some(fcm) = state.fcm.clone() else {
+            return Ok(json_response(503, r#"{"error":"FCM not configured"}"#));
+        };
+
+        let body = match req.collect().await {
+            Ok(b) => b.to_bytes(),
+            Err(_) => return Ok(json_response(400, r#"{"error":"invalid body"}"#)),
+        };
+        #[derive(serde::Deserialize)]
+        struct BroadcastReq {
+            title: String,
+            body:  String,
+            #[serde(default)]
+            data:  std::collections::HashMap<String, String>,
+        }
+        let req_body: BroadcastReq = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(_) => return Ok(json_response(400, r#"{"error":"expected {title,body}"}"#)),
+        };
+
+        let tokens = state.all_fcm_tokens().await;
+        let count  = tokens.len();
+        tokio::spawn(async move {
+            for t in tokens {
+                let _ = fcm.send(&t, &req_body.title, &req_body.body, req_body.data.clone()).await;
+            }
+        });
+        let body = serde_json::json!({ "ok": true, "recipients": count }).to_string();
+        return Ok(json_response(200, &body));
+    }
+
     // ── POST /register-token  { "token": "fcm_token_here" } ──────────────────
     if method == Method::POST && path == "/register-token" {
         let token = auth::token_from_query(query.as_deref());

@@ -180,9 +180,12 @@ async fn send_fcm_to_offline(state: &AppState, room_id: &str, sender_id: &str) {
     let sender_id = sender_id.to_string();
     tokio::spawn(async move {
         for token in tokens {
-            let _ = fcm
-                .send(&token, "Новое сообщение", &format!("От {sender_id}"), &room_id, &sender_id)
-                .await;
+            let data = std::collections::HashMap::from([
+                ("room_id".to_string(),   room_id.clone()),
+                ("sender_id".to_string(), sender_id.clone()),
+                ("type".to_string(),      "chat_message".to_string()),
+            ]);
+            let _ = fcm.send(&token, "Новое сообщение", &format!("От {sender_id}"), data).await;
         }
     });
 }

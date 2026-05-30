@@ -107,8 +107,7 @@ impl FcmClient {
         fcm_token: &str,
         title: &str,
         body: &str,
-        room_id: &str,
-        sender_id: &str,
+        data: std::collections::HashMap<String, String>,
     ) -> Result<()> {
         let token = self.access_token().await?;
         let url = format!(
@@ -120,7 +119,7 @@ impl FcmClient {
             "message": {
                 "token": fcm_token,
                 "notification": { "title": title, "body": body },
-                "data": { "room_id": room_id, "sender_id": sender_id },
+                "data": data,
                 "android": { "priority": "high" },
                 "apns": { "headers": { "apns-priority": "10" } }
             }

@@ -167,6 +167,25 @@ impl AppState {
         .unwrap_or_default()
     }
 
+    /// Returns the FCM token for a single user, if registered.
+    pub async fn fcm_token_for_user(&self, user_id: &str) -> Option<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT fcm_token FROM device_tokens WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .unwrap_or(None)
+    }
+
+    /// Returns all registered FCM tokens (for broadcast).
+    pub async fn all_fcm_tokens(&self) -> Vec<String> {
+        sqlx::query_scalar::<_, String>("SELECT fcm_token FROM device_tokens")
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default()
+    }
+
     pub async fn publish(&self, room_id: &str, msg: Bytes) {
         let channel = format!("room:{room_id}");
         let mut conn = self.redis_pub.lock().await;
