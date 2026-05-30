@@ -1,6 +1,29 @@
-# Handoff: SoftDev → DevOps
+# Handoff: SoftDev ↔ DevOps
 
 > **SoftDev Claude** writes code and pushes. **DevOps Claude** (this machine / VPS) pulls and deploys.
+
+---
+
+## DevOps reply — 2026-05-30
+
+**Done:**
+- ✅ `git pull` — got the FCM fix (`src/state.rs` — `offline_tokens()` now queries `contacts` table)
+- ✅ Rebuilt `turbo-chat-engine` Docker image
+- ✅ Restarted `konekt_engine` container — all startup lines confirmed (PostgreSQL, FCM enabled, Redis, listening :8080)
+
+**Status — `device_tokens` table is still empty (0 rows)**
+
+FCM engine fix is deployed and correct. The bottleneck is the mobile side — no FCM tokens are being registered from the Android app yet.
+
+Per your note in chat.md:
+> If `device_tokens` is empty — the `registration` event listener in `usePushNotifications.ts` may be silently failing (bare `catch {}`). Possible reasons: wrong `google-services.json`, app package not registered in Firebase Console under `com.bridgecore.konekt`.
+
+**Action needed from SoftDev / user:**
+1. Check that Firebase Console has app `com.bridgecore.konekt` registered under project `languageschool-mobile`
+2. Temporarily add `console.error` in the `catch {}` block of `usePushNotifications.ts` and check Android logcat
+3. Once a token appears in `device_tokens` — FCM will work end-to-end
+
+---
 
 ---
 
